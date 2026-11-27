@@ -1,0 +1,57 @@
+/* Calm, springy feel for buttons, plus the shared left/right edges of the home screen.
+   Everything here is switched off for people who ask their phone for reduced motion. */
+
+@media (prefers-reduced-motion: no-preference) {
+  html button:not(:disabled):not(.maplibregl-ctrl button),
+  html [role="button"],
+  html a[href][class*="rounded-"] {
+    transition:
+      transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
+      box-shadow 200ms ease,
+      background-color 160ms ease,
+      border-color 160ms ease,
+      color 160ms ease,
+      opacity 160ms ease,
+      filter 160ms ease;
+  }
+  @media (hover: hover) {
+    html button:not(:disabled):not(.maplibregl-ctrl button):hover,
+    html [role="button"]:hover,
+    html a[href][class*="rounded-"]:hover {
+      transform: translateY(-1px) scale(1.025);
+    }
+  }
+  html button:not(:disabled):not(.maplibregl-ctrl button):active,
+  html [role="button"]:active,
+  html a[href][class*="rounded-"]:active {
+    transform: scale(0.95);
+    transition-duration: 90ms;
+  }
+  /* sheets rise with a tiny overshoot */
+  html .anim-sheet {
+    animation: sheet-up 320ms cubic-bezier(0.34, 1.4, 0.64, 1) both;
+  }
+}
+
+/* Side margin of the home screen: hugs the edge on phones, a little more room on bigger windows.
+   The top bar, bottom cards, station list, map buttons and sheets all use it, so they line up. */
+:root {
+  --edge: 1rem;
+}
+@media (min-width: 48rem) {
+  :root {
+    --edge: 1.5rem;
+  }
+}
+@media (min-width: 80rem) {
+  :root {
+    --edge: 2rem;
+  }
+}
+
+/* wide screens: the map buttons sit at the right edge, under the station list */
+@media (min-width: 48rem) {
+  .map-controls {
+    bottom: 7rem !important;
+  }
+}

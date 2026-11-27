@@ -12,6 +12,12 @@ case "${1:-help}" in
   check)   cd $WEB && npx --no-install tsc --noEmit && $PM run lint && echo "OK: types + lint pass" ;;
   build)   cd $WEB && $PM run build ;;
   add)     shift; cd $WEB && if [ "$PM" = pnpm ]; then pnpm add "$@"; else npm install "$@"; fi ;;
+  db)      shift; cd $WEB && case "${1:-setup}" in
+             setup)  npx prisma generate && npx prisma db push && npx tsx prisma/seed.ts ;;
+             reset)  rm -f prisma/dev.db prisma/dev.db-journal && npx prisma db push && npx tsx prisma/seed.ts ;;
+             studio) npx prisma studio ;;
+             *)      echo "Use: ./vrc db [setup|reset|studio]" ;;
+           esac ;;
   save)    shift; git add -A && git commit -qm "${*:-checkpoint}" && echo "committed: ${*:-checkpoint}" ;;
   tree)    find . -type f -not -path '*/node_modules/*' -not -path './.git/*' -not -path '*/.next/*' -not -path './.vrc-backup/*' -not -name 'pnpm-lock.yaml' -not -name 'package-lock.json' | sort ;;
   help|*)  cat <<'H'
@@ -22,6 +28,9 @@ case "${1:-help}" in
 ./vrc check          typecheck + lint (paste errors back to me)
 ./vrc build          production build
 ./vrc add <pkg...>   install a package into web/
+./vrc db             create/update the database and add starter accounts
+./vrc db reset       wipe the development database and start fresh
+./vrc db studio      browse the database in your browser
 ./vrc save "msg"     git commit checkpoint
 ./vrc tree           list project files
 H

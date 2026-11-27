@@ -1,0 +1,311 @@
+// VRC Power database. SQLite for development (zero setup). For production we switch the
+// provider to postgresql, point DATABASE_URL at a hosted database and create fresh migrations.
+// Money is stored as whole cents (Int), never floats.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                 String    @id @default(cuid())
+  role               String // "customer" | "agent" | "admin"
+  status             String    @default("active") // "active" | "suspended"
+  name               String
+  phone              String?   @unique // 0771234567 (customers and agents)
+  email              String?   @unique // admins log in with this
+  passwordHash       String
+  mustChangePassword Boolean   @default(false)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  lastLoginAt        DateTime?
+  code               String?   @unique // short public ID printed in the QR code, e.g. USER-482193
+  sessions           Session[]
+  wallet             Wallet?
+  ledger             LedgerEntry[]
+  rentals            Rental[]
+  agentProfile       AgentProfile?
+
+  @@index([role])
+}
+
+// A logged-in browser. The cookie holds a random token; only its SHA-256 is stored here,
+// so a leaked database can't be used to hijack sessions.
+model Session {
+  id         String   @id // sha256 of the cookie token
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  expiresAt  DateTime
+  ip         String?
+  userAgent  String?
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// One SMS code check (sign up, or password reset). The id is a random secret the browser holds.
+model Challenge {
+  id         String    @id
+  purpose    String // "signup" | "reset"
+  phone      String
+  codeHash   String // HMAC of the code, never the code itself
+  attempts   Int       @default(0)
+  payload    String? // signup: JSON with name, email and the already-hashed password
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  verifiedAt DateTime?
+  usedAt     DateTime?
+
+  @@index([phone, purpose])
+  @@index([expiresAt])
+}
+
+// Counters for login attempts, SMS sends and so on. Lives in the database so limits hold
+// across server restarts and multiple server instances.
+model RateLimit {
+  key     String   @id
+  count   Int
+  resetAt DateTime
+}
+
+// Append-only record of security-relevant events. Nothing in the app edits or deletes rows.
+model AuditLog {
+  id        String   @id @default(cuid())
+  at        DateTime @default(now())
+  actorId   String?
+  actorRole String
+  action    String
+  target    String   @default("")
+  detail    String   @default("")
+  ip        String?
+
+  @@index([at])
+  @@index([action])
+}
+
+model AgentApplication {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  name      String
+  phone     String
+  area      String
+  note      String   @default("")
+  status    String   @default("new") // "new" | "contacted" | "approved" | "declined"
+  ip        String?
+
+  @@index([status])
+}
+
+/* ------------------------------------------------------------------ wallet
+   The ledger is the source of truth: every credit and debit is a row, never edited or deleted.
+   Wallet holds running totals so reads are fast; they must always equal the sum of the ledger. */
+
+model Wallet {
+  userId     String   @id
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cashCents  Int      @default(0) // bought with real money: refundable
+  promoCents Int      @default(0) // goodwill credit: spent first, never refundable
+  updatedAt  DateTime @updatedAt
+}
+
+model LedgerEntry {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  at          DateTime @default(now())
+  kind        String // "topup" | "rental" | "purchase" | "overdue" | "refund" | "adjust"
+  title       String
+  note        String   @default("")
+  amountCents Int // signed total: + in, - out
+  cashCents   Int // signed part taken from or added to cash credits
+  promoCents  Int // signed part taken from or added to promo credits
+  refId       String? // payment reference, rental code, power bank id...
+
+  @@unique([kind, refId]) // the same payment or rental can never be booked twice
+  @@index([userId, at])
+}
+
+/* ------------------------------------------------------------------ stations and power banks */
+
+model Station {
+  id        String   @id // short name used in the app, e.g. "hicc"
+  code      String   @unique // text on the QR sticker, e.g. "VRC-HC03"
+  name      String
+  venue     String
+  status    String   @default("online") // "online" | "offline"
+  slotCount Int      @default(8)
+  address   String   @default("") // street address or directions, shown under the name
+  // Where the station really is (WGS84 degrees). The default is central Harare and means "position not set yet".
+  lat       Float    @default(-17.8292)
+  lng       Float    @default(31.0522)
+  createdAt DateTime @default(now())
+}
+
+model PowerBank {
+  id        String  @id @default(cuid())
+  serial    String  @unique
+  status    String  @default("docked") // "docked" | "rented" | "sold" | "lost"
+  stationId String?
+  slot      Int? // 0-based slot while docked
+  charge    Int     @default(0)
+
+  @@unique([stationId, slot]) // one power bank per slot
+  @@index([stationId, status])
+}
+
+model Rental {
+  id               String    @id @default(cuid())
+  code             String    @unique // shown to the customer, e.g. R-3F9A12
+  userId           String
+  user             User      @relation(fields: [userId], references: [id])
+  powerBankId      String
+  fromStationId    String
+  fromSlot         Int
+  startCharge      Int
+  startedAt        DateTime  @default(now())
+  endedAt          DateTime?
+  returnedStationId String?
+  status           String    @default("active") // "active" | "returned" | "converted"
+  chargedCents     Int       @default(0)
+  acknowledgedAt   DateTime? // customer has seen the "converted to a purchase" notice
+  // The rules this rental started under. A later change of the price list never changes a rental already out.
+  rateCents        Int       @default(100)
+  overdueHours     Int       @default(24)
+  outrightCents    Int       @default(1500)
+
+  @@index([userId, status])
+  @@index([status, startedAt])
+}
+
+/* ------------------------------------------------------------------ agents
+   An agent hands out VRC Credits to customers in exchange for cash. The "float" is the pool of credits the
+   company has given them to hand out. Every credit handed out reduces the float and must be matched by cash,
+   which is counted and compared at the end of each shift. */
+
+model AgentProfile {
+  userId     String   @id
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  venue      String   @default("")
+  event      String   @default("")
+  stationIds String   @default("") // comma-separated station ids, e.g. "hicc,kopje"
+  floatCents Int      @default(0) // credits still available to hand out
+  updatedAt  DateTime @updatedAt
+}
+
+model FloatEntry {
+  id          String   @id @default(cuid())
+  agentId     String
+  at          DateTime @default(now())
+  kind        String // "issue" (company adds float) | "given" (credits handed to a customer) | "adjust"
+  amountCents Int // signed
+  refId       String?
+  note        String   @default("")
+
+  @@unique([kind, refId])
+  @@index([agentId, at])
+}
+
+model Shift {
+  id               String    @id @default(cuid())
+  agentId          String
+  startedAt        DateTime  @default(now())
+  endedAt          DateTime?
+  status           String    @default("open") // "open" | "closed"
+  floatAtStartCents Int
+  txnCount         Int       @default(0)
+  expectedCents    Int? // cash the agent should be holding: credits handed out
+  countedCents     Int? // cash the agent says they counted
+  diffCents        Int? // counted - expected (0 = matched)
+  earnedCents      Int?
+
+  @@index([agentId, status])
+  @@index([agentId, endedAt])
+}
+
+model AgentTxn {
+  id              String   @id @default(cuid())
+  shiftId         String
+  agentId         String
+  customerId      String
+  customerCode    String
+  customerName    String
+  kind            String // "topup" | "sale"
+  amountCents     Int
+  commissionCents Int
+  clientRef       String // chosen by the phone for each attempt, so a retry can never credit twice
+  at              DateTime @default(now())
+
+  @@unique([agentId, clientRef])
+  @@index([shiftId, at])
+}
+
+model Payout {
+  id          String   @id @default(cuid())
+  agentId     String
+  at          DateTime @default(now())
+  amountCents Int
+  note        String   @default("")
+
+  @@index([agentId, at])
+}
+
+/* ------------------------------------------------------------------ admin: settings and station commands */
+
+// Admin-editable settings. One row, key "rules", holding the price list as JSON.
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+// A request for a station to do something (for now: open a slot). The station server picks these up
+// and marks them done. Until stations are connected they stay "queued".
+model StationCommand {
+  id          String    @id @default(cuid())
+  stationId   String
+  slot        Int // 1-based, as shown to people
+  kind        String    @default("unlock")
+  status      String    @default("queued") // "queued" | "sent" | "done" | "failed"
+  reason      String
+  requestedBy String
+  createdAt   DateTime  @default(now())
+  doneAt      DateTime?
+
+  @@index([stationId, createdAt])
+  @@index([status])
+}
+
+/* ------------------------------------------------------------------ Paynow payments */
+
+// One attempt to buy credits through Paynow. Credits are added to the wallet only when Paynow confirms the
+// payment (creditedAt is set in the same database transaction as the ledger entry, and only once).
+model Payment {
+  id              String    @id @default(cuid())
+  reference       String    @unique // our reference, sent to Paynow
+  userId          String
+  method          String // "ecocash" | "onemoney" | "card"
+  phone           String? // the wallet being charged (mobile money only)
+  amountCents     Int
+  status          String    @default("pending") // "pending" | "paid" | "failed" | "cancelled"
+  paynowStatus    String    @default("") // the last status text Paynow gave us
+  paynowReference String?
+  pollUrl         String?
+  browserUrl      String? // where a card payer is sent
+  instructions    String?
+  error           String? // for the admin; never shown to customers as-is
+  flag            String? // set when a person needs to look at it
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  lastCheckedAt   DateTime?
+  paidAt          DateTime?
+  creditedAt      DateTime?
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
